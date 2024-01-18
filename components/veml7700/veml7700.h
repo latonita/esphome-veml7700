@@ -11,7 +11,7 @@ namespace veml7700 {
 using esphome::i2c::ErrorCode;
 
 //
-// https://www.vishay.com/docs/84286/veml7700.pdf
+// Datasheet:  https://www.vishay.com/docs/84286/veml7700.pdf
 //
 
 enum CommandRegisters : uint8_t {
@@ -24,9 +24,8 @@ enum CommandRegisters : uint8_t {
   CR_ALS_INT = 0x06      // R: ALS INT trigger event
 };
 
-// Sensor gain levels
 enum Gain : uint8_t {
-  X_1 = 0,  // default
+  X_1 = 0,
   X_2 = 1,
   X_1_8 = 2,
   X_1_4 = 3,
@@ -34,8 +33,8 @@ enum Gain : uint8_t {
 const uint8_t GAINS_COUNT = 4;
 
 enum IntegrationTime : uint8_t {
-  INTEGRATION_TIME_25MS = 0b1100,  // 12
-  INTEGRATION_TIME_50MS = 0b1000,  // 8
+  INTEGRATION_TIME_25MS = 0b1100,
+  INTEGRATION_TIME_50MS = 0b1000,
   INTEGRATION_TIME_100MS = 0b0000,
   INTEGRATION_TIME_200MS = 0b0001,
   INTEGRATION_TIME_400MS = 0b0010,
@@ -98,12 +97,18 @@ union PSMRegister {
 
 class VEML7700Component : public PollingComponent, public i2c::I2CDevice {
  public:
+  //
+  // EspHome framework functions
+  //
   float get_setup_priority() const override { return setup_priority::DATA; }
   void setup() override;
   void dump_config() override;
   void update() override;
   void loop() override;
 
+  //
+  // Configuration setters
+  //
   void set_gain(Gain gain) { this->gain_ = gain; }
   void set_integration_time(IntegrationTime time) { this->integration_time_ = time; }
   void set_enable_automatic_mode(bool enable) { this->automatic_mode_enabled_ = enable; }
@@ -155,13 +160,13 @@ class VEML7700Component : public PollingComponent, public i2c::I2CDevice {
   // Device interaction
   //
   ErrorCode configure_();
-  ErrorCode reconfigure_time_and_gain_sd_(IntegrationTime time, Gain gain, bool shutdown);
+  ErrorCode reconfigure_time_and_gain_(IntegrationTime time, Gain gain, bool shutdown);
   ErrorCode read_sensor_output_(Readings &data);
 
   //
   // Working with the data
   //
-  bool are_adjustments_required(Readings &data);
+  bool are_adjustments_required_(Readings &data);
   void apply_lux_calculation_(Readings &data);
   void apply_lux_compensation_(Readings &data);
   void apply_glass_attenuation_(Readings &data);

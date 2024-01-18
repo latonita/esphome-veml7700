@@ -40,7 +40,7 @@ template<typename T, size_t size> T get_prev(const T (&array)[size], const T val
   return array[i - 1];
 }
 
-uint16_t get_itime_ms(IntegrationTime time) {
+static uint16_t get_itime_ms(IntegrationTime time) {
   uint16_t ms = 0;
   switch (time) {
     case INTEGRATION_TIME_100MS:
@@ -67,12 +67,12 @@ uint16_t get_itime_ms(IntegrationTime time) {
   return ms;
 }
 
-float get_gain_coeff(Gain gain) {
+static float get_gain_coeff(Gain gain) {
   static const float GAIN_FLOAT[GAINS_COUNT] = {1.0f, 2.0f, 0.125f, 0.25f};
   return GAIN_FLOAT[gain & 0b11];
 }
 
-const char *get_gain_str(Gain gain) {
+static const char *get_gain_str(Gain gain) {
   static const char *gain_str[GAINS_COUNT] = {"1x", "2x", "1/8x", "1/4x"};
   return gain_str[gain & 0b11];
 }
@@ -151,13 +151,13 @@ void VEML7700Component::loop() {
 
       case State::CollectingDataAuto:  // Automatic mode - we start here to reconfigure device first
       case State::DataCollected:
-        if (!this->are_adjustments_required(this->readings_)) {
+        if (!this->are_adjustments_required_(this->readings_)) {
           this->state_ = State::ReadyToPublishPart1;
         } else {
           // if sensitivity adjustment needed -
           // shutdown device to change config and wait one integration time period
           this->state_ = State::AdjustmentInProgress;
-          err = this->reconfigure_time_and_gain_sd_(this->readings_.actual_time, this->readings_.actual_gain, true);
+          err = this->reconfigure_time_and_gain_(this->readings_.actual_time, this->readings_.actual_gain, true);
           if (err == i2c::ERROR_OK) {
             this->set_timeout(1 * get_itime_ms(this->readings_.actual_time),
                               [this]() { this->state_ = State::ReadyToApplyAdjustments; });
@@ -175,7 +175,7 @@ void VEML7700Component::loop() {
         // second stage of sensitivity adjustment - turn device back on
         // and wait 2-3 integration time periods to get good data samples
         this->state_ = State::AdjustmentInProgress;
-        err = this->reconfigure_time_and_gain_sd_(this->readings_.actual_time, this->readings_.actual_gain, false);
+        err = this->reconfigure_time_and_gain_(this->readings_.actual_time, this->readings_.actual_gain, false);
         if (err == i2c::ERROR_OK) {
           this->set_timeout(3 * get_itime_ms(this->readings_.actual_time),
                             [this]() { this->state_ = State::CollectingData; });
@@ -249,9 +249,9 @@ ErrorCode VEML7700Component::configure_() {
   return err;
 }
 
-ErrorCode VEML7700Component::reconfigure_time_and_gain_sd_(IntegrationTime time, Gain gain, bool shutdown) {
-  ESP_LOGD(TAG, "Reconfigure time and gain(%d ms, %s, shutdown %s)", get_itime_ms(time), get_gain_str(gain),
-           TRUEFALSE(shutdown));
+ErrorCode VEML7700Component::reconfigure_time_and_gain_(IntegrationTime time, Gain gain, bool shutdown) {
+  ESP_LOGD(TAG, "Reconfigure time and gain (%d ms, %s) %s)", get_itime_ms(time), get_gain_str(gain),
+           shutdown ? "Shutting down" : "Turning back on");
 
   ConfigurationRegister als_conf{0};
   als_conf.raw = 0;
@@ -289,12 +289,12 @@ ErrorCode VEML7700Component::read_sensor_output_(Readings &data) {
   data.actual_time = conf.ALS_IT;
   data.actual_gain = conf.ALS_GAIN;
 
-  ESP_LOGD(TAG, "read_device_counts: ALS = %d, WHITE = %d, Gain = %s, Time = %d ms", data.als_counts, data.white_counts,
+  ESP_LOGD(TAG, "Data from sensors: ALS = %d, WHITE = %d, Gain = %s, Time = %d ms", data.als_counts, data.white_counts,
            get_gain_str(data.actual_gain), get_itime_ms(data.actual_time));
   return std::max(als_err, white_err);
 }
 
-bool VEML7700Component::are_adjustments_required(Readings &data) {
+bool VEML7700Component::are_adjustments_required_(Readings &data) {
   // skip first sample in auto mode -
   // we need to reconfigure device after last measurement
   if (this->state_ == State::CollectingDataAuto)
@@ -307,10 +307,10 @@ bool VEML7700Component::are_adjustments_required(Readings &data) {
   static constexpr uint16_t LOW_INTENSITY_THRESHOLD = 100;
   static constexpr uint16_t HIGH_INTENSITY_THRESHOLD = 10000;
 
-  IntegrationTime times[INTEGRATION_TIMES_COUNT] = {INTEGRATION_TIME_25MS,  INTEGRATION_TIME_50MS,
-                                                    INTEGRATION_TIME_100MS, INTEGRATION_TIME_200MS,
-                                                    INTEGRATION_TIME_400MS, INTEGRATION_TIME_800MS};
-  Gain gains[GAINS_COUNT] = {X_1_8, X_1_4, X_1, X_2};
+  static const IntegrationTime times[INTEGRATION_TIMES_COUNT] = {INTEGRATION_TIME_25MS,  INTEGRATION_TIME_50MS,
+                                                                 INTEGRATION_TIME_100MS, INTEGRATION_TIME_200MS,
+                                                                 INTEGRATION_TIME_400MS, INTEGRATION_TIME_800MS};
+  static const Gain gains[GAINS_COUNT] = {X_1_8, X_1_4, X_1, X_2};
 
   if (data.als_counts <= LOW_INTENSITY_THRESHOLD) {
     Gain next_gain = get_next(gains, data.actual_gain);
@@ -403,12 +403,12 @@ void VEML7700Component::publish_data_part_1_(Readings &data) {
   if (this->white_sensor_ != nullptr) {
     this->white_sensor_->publish_state(data.white_lux);
   }
-}
-
-void VEML7700Component::publish_data_part_2_(Readings &data) {
   if (this->fake_infrared_sensor_ != nullptr) {
     this->fake_infrared_sensor_->publish_state(data.fake_infrared_lux);
   }
+}
+
+void VEML7700Component::publish_data_part_2_(Readings &data) {
   if (this->ambient_light_counts_sensor_ != nullptr) {
     this->ambient_light_counts_sensor_->publish_state(data.als_counts);
   }
