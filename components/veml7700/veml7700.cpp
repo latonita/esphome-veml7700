@@ -6,145 +6,421 @@ namespace esphome {
 namespace veml7700 {
 
 static const char *const TAG = "veml7700";
+static const size_t VEML_REG_SIZE = 2;
 
-static const float RESOLUTION_MAP[VEML7700_GAIN_COUNT][VEML7700_IT_TIME_COUNT] = {
-    // 100ms   200ms   400ms   800ms   25ms    50ms
-    {0.0576, 0.0288, 0.0144, 0.0072, 0.2304, 0.1152},  // X1
-    {0.0288, 0.0144, 0.0072, 0.0036, 0.1152, 0.0576},  // X2
-    {0.4608, 0.2304, 0.1152, 0.0576, 1.8432, 0.9216},  // X/8
-    {0.2304, 0.1152, 0.0576, 0.0288, 0.9216, 0.4608}   // X/4
-};
+static float reduce_to_zero(float a, float b) { return (a > b) ? (a - b) : 0; }
 
-static const char *VEML7700_GAIN_STR[VEML7700_GAIN_COUNT] = {"x1", "x2", "x1/8", "x1/4"};
-static const uint16_t VEML7700_IT_TIME[VEML7700_IT_TIME_COUNT] = {100, 200, 400, 800, 25, 50};
-
-uint8_t VEML7700Component::map_time_to_index_(VEML7700IntegrationTime it) {
-  uint8_t it_index = 0;
-  if (it <= VEML7700_INTEGRATION_TIME_800MS) {
-    it_index = it;
-  } else if (it == VEML7700_INTEGRATION_TIME_25MS) {
-    it_index = 4;
-  } else if (it == VEML7700_INTEGRATION_TIME_50MS) {
-    it_index = 5;
-  } else
-    it_index = 0;
-  return it_index < VEML7700_IT_TIME_COUNT ? it_index : 0;
+template<typename T, size_t size> T get_next(const T (&array)[size], const T val) {
+  size_t i = 0;
+  size_t idx = -1;
+  while (idx == -1 && i < size) {
+    if (array[i] == val) {
+      idx = i;
+      break;
+    }
+    i++;
+  }
+  if (idx == -1 || i + 1 >= size)
+    return val;
+  return array[i + 1];
 }
 
-bool VEML7700Component::read_sensor_data_() {
-  ESP_LOGD(TAG, "Reading sensor data");
-  esphome::i2c::ErrorCode err;
-  uint16_t als_couts{0};
-  uint16_t white_couts{0};
-
-  err = this->read_register(VEML7700CommandRegisters::VEML7700_CR_ALS, (uint8_t *) &als_couts, 2, false);
-  if (err)
-    ESP_LOGW(TAG, "Error reading ALS register");
-
-  err = this->read_register(VEML7700CommandRegisters::VEML7700_CR_WHITE, (uint8_t *) &white_couts, 2, false);
-  if (err)
-    ESP_LOGW(TAG, "Error reading WHITE register");
-
-  float lux_resolution = RESOLUTION_MAP[this->gain_ & 0b11][this->map_time_to_index_(this->integration_time_)];
-  ESP_LOGD(TAG, "Resolution lx/counts = %.4f", lux_resolution);
-
-  this->als_lux_ = lux_resolution * (float) als_couts;
-  this->white_lux_ = lux_resolution * (float) white_couts;
-
-  ESP_LOGD(TAG, "ALS counts = %d, lux = %.1f", als_couts, this->als_lux_);
-  ESP_LOGD(TAG, "WHITE counts = %d, lux = %.1f ", white_couts, this->white_lux_);
-
-  uint32_t als_lux = 0;
-
-  if (this->ambient_light_sensor_ != nullptr) {
-    this->ambient_light_sensor_->publish_state(this->als_lux_);
+template<typename T, size_t size> T get_prev(const T (&array)[size], const T val) {
+  size_t i = size - 1;
+  size_t idx = -1;
+  while (idx == -1 && i > 0) {
+    if (array[i] == val) {
+      idx = i;
+      break;
+    }
+    i--;
   }
-
-  if (this->white_sensor_ != nullptr) {
-    this->white_sensor_->publish_state(this->white_lux_);
-  }
-
-  return true;
+  if (idx == -1 || i == 0)
+    return val;
+  return array[i - 1];
 }
 
-esphome::i2c::ErrorCode VEML7700Component::configure_() {
-  ESP_LOGD(TAG, "Configure");
-  esphome::i2c::ErrorCode err;
+uint16_t get_itime_ms(IntegrationTime time) {
+  uint16_t ms = 0;
+  switch (time) {
+    case INTEGRATION_TIME_100MS:
+      ms = 100;
+      break;
+    case INTEGRATION_TIME_200MS:
+      ms = 200;
+      break;
+    case INTEGRATION_TIME_400MS:
+      ms = 400;
+      break;
+    case INTEGRATION_TIME_800MS:
+      ms = 800;
+      break;
+    case INTEGRATION_TIME_50MS:
+      ms = 50;
+      break;
+    case INTEGRATION_TIME_25MS:
+      ms = 25;
+      break;
+    default:
+      ms = 100;
+  }
+  return ms;
+}
 
-  VEML7700ConfigurationRegister als_conf{0};
-  als_conf.raw = 0;
-  als_conf.ALS_SD = false;
-  als_conf.ALS_INT_EN = false;
-  als_conf.ALS_PERS = VEML7700Persistence::VEML7700_PERSISTENCE_1;
-  als_conf.ALS_IT = this->integration_time_;
-  als_conf.ALS_GAIN = this->gain_;
-  ESP_LOGD(TAG, "Setting ALS_CONF_0 to 0x%04X", als_conf.raw);
-  err = this->write_register(VEML7700CommandRegisters::VEML7700_CR_ALS_CONF_0, als_conf.raw_bytes, 2);
-  if (!err)
-    return err;
+float get_gain_coeff(Gain gain) {
+  static const float GAIN_FLOAT[GAINS_COUNT] = {1.0f, 2.0f, 0.125f, 0.25f};
+  return GAIN_FLOAT[gain & 0b11];
+}
 
-  uint16_t threshold_low = 0x0000;  // set low threshold to min
-  err = this->write_register(VEML7700CommandRegisters::VEML7700_CR_ALS_WH, (uint8_t *) &threshold_low, 2);
-  if (!err)
-    return err;
-
-  uint16_t threshold_high = 0xffff;  // set high threshold to max
-  err = this->write_register(VEML7700CommandRegisters::VEML7700_CR_ALS_WL, (uint8_t *) &threshold_high, 2);
-  if (!err)
-    return err;
-
-  VEML7700PSMRegister psm{0};
-  psm.PSM = VEML7700PSM::VEML7700_PSM_MODE_1;
-  psm.PSM_EN = false;
-  ESP_LOGD(TAG, "Setting PSM to 0x%04X", psm.raw);
-  err = this->write_register(VEML7700CommandRegisters::VEML7700_CR_PWR_SAVING, (uint8_t *) &(psm.raw), 2);
-  if (!err)
-    return err;
-
-  delay(3);  // 2.5 ms before the first measurement is needed, allowing for the correct start of the signal processor
-             // and oscillator.
-
-  err = this->read_register(VEML7700CommandRegisters::VEML7700_CR_ALS_CONF_0, als_conf.raw_bytes, 2);
-  ESP_LOGD(TAG, "Read ALS_CONF_0 0x%04X, err =  %d", als_conf.raw, err);
-  return err;
+const char *get_gain_str(Gain gain) {
+  static const char *gain_str[GAINS_COUNT] = {"1x", "2x", "1/8x", "1/4x"};
+  return gain_str[gain & 0b11];
 }
 
 void VEML7700Component::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up VEML7700");
+  ESP_LOGCONFIG(TAG, "Setting up VEML7700/6030...");
 
   auto err = this->configure_();
   if (err != i2c::ERROR_OK) {
     ESP_LOGW(TAG, "Sensor configuration failed");
     this->mark_failed();
+  } else {
+    this->state_ = State::InitialSetupCompleted;
   }
 }
 
 void VEML7700Component::dump_config() {
   LOG_I2C_DEVICE(this);
-  ESP_LOGCONFIG(TAG, "  Gain: %s", VEML7700_GAIN_STR[this->gain_]);
-  ESP_LOGCONFIG(TAG, "  Integration time: %d ms", VEML7700_IT_TIME[this->map_time_to_index_(this->integration_time_)]);
-  ESP_LOGCONFIG(TAG, "  Attenuation factor: %f", this->attenuation_factor_);
+  ESP_LOGCONFIG(TAG, "  Automatic gain/time: %s", YESNO(this->automatic_mode_enabled_));
+  if (!this->automatic_mode_enabled_) {
+    ESP_LOGCONFIG(TAG, "  Gain: %s", get_gain_str(this->gain_));
+    ESP_LOGCONFIG(TAG, "  Integration time: %d ms", get_itime_ms(this->integration_time_));
+  }
+  ESP_LOGCONFIG(TAG, "  Lux compensation: %s", YESNO(this->lux_compensation_enabled_));
+  ESP_LOGCONFIG(TAG, "  Glass attenuation factor: %f", this->glass_attenuation_factor_);
   LOG_UPDATE_INTERVAL(this);
 
-  if (this->ambient_light_sensor_ != nullptr)
-    LOG_SENSOR("  ", "ALS full spectrum channel", this->ambient_light_sensor_);
-  if (this->white_sensor_ != nullptr)
-    LOG_SENSOR("  ", "White channel", this->white_sensor_);
+  LOG_SENSOR("  ", "ALS channel lux", this->ambient_light_sensor_);
+  LOG_SENSOR("  ", "ALS channel counts", this->ambient_light_counts_sensor_);
+  LOG_SENSOR("  ", "WHITE channel lux", this->white_sensor_);
+  LOG_SENSOR("  ", "WHITE channel counts", this->white_counts_sensor_);
+  LOG_SENSOR("  ", "FAKE_IR channel lux", this->fake_infrared_sensor_);
+  LOG_SENSOR("  ", "Actual gain", this->actual_gain_sensor_);
+  LOG_SENSOR("  ", "Actual integration time", this->actual_integration_time_sensor_);
 
   if (this->is_failed()) {
-    ESP_LOGE(TAG, "Communication with I2C VEML-7700 failed!");
+    ESP_LOGE(TAG, "Communication with I2C VEML7700/6030 failed!");
   }
 }
 
 void VEML7700Component::update() {
   ESP_LOGD(TAG, "Updating");
+  if (this->is_ready() && this->state_ == State::Idle) {
+    ESP_LOGD(TAG, "Initiating new data collection");
 
-  if (this->is_ready() && !this->reading_) {
-    this->reading_ = true;
-    this->read_sensor_data_();
-    this->reading_ = false;
+    this->state_ = this->automatic_mode_enabled_ ? State::CollectingDataAuto : State::CollectingData;
+
+    this->readings_.als_counts = 0;
+    this->readings_.white_counts = 0;
+    this->readings_.actual_time = this->integration_time_;
+    this->readings_.actual_gain = this->gain_;
+    this->readings_.als_lux = 0;
+    this->readings_.white_lux = 0;
+    this->readings_.fake_infrared_lux = 0;
+  } else {
+    ESP_LOGD(TAG, "Component not ready yet");
   }
 }
 
+void VEML7700Component::loop() {
+  ErrorCode err = i2c::ERROR_OK;
+
+  if (this->state_ == State::InitialSetupCompleted) {
+    // Datasheet: 2.5 ms before the first measurement is needed, allowing for the correct start of the signal processor
+    // and oscillator.
+    // Reality: wait for couple integration times to have first samples captured
+    this->set_timeout(2 * this->integration_time_, [this]() { this->state_ = State::Idle; });
+  }
+
+  if (this->is_ready()) {
+    switch (this->state_) {
+      case State::CollectingData:
+        err = this->read_sensor_output_(this->readings_);
+        this->state_ = (err == i2c::ERROR_OK) ? State::DataCollected : State::Idle;
+        break;
+
+      case State::CollectingDataAuto:  // Automatic mode - we start here to reconfigure device first
+      case State::DataCollected:
+        if (!this->are_adjustments_required(this->readings_)) {
+          this->state_ = State::ReadyToPublishPart1;
+        } else {
+          // if sensitivity adjustment needed -
+          // shutdown device to change config and wait one integration time period
+          this->state_ = State::AdjustmentInProgress;
+          err = this->reconfigure_time_and_gain_sd_(this->readings_.actual_time, this->readings_.actual_gain, true);
+          if (err == i2c::ERROR_OK) {
+            this->set_timeout(1 * get_itime_ms(this->readings_.actual_time),
+                              [this]() { this->state_ = State::ReadyToApplyAdjustments; });
+          } else {
+            this->state_ = State::Idle;
+          }
+        }
+        break;
+
+      case State::AdjustmentInProgress:
+        // nothing to be done, just waiting for the timeout
+        break;
+
+      case State::ReadyToApplyAdjustments:
+        // second stage of sensitivity adjustment - turn device back on
+        // and wait 2-3 integration time periods to get good data samples
+        this->state_ = State::AdjustmentInProgress;
+        err = this->reconfigure_time_and_gain_sd_(this->readings_.actual_time, this->readings_.actual_gain, false);
+        if (err == i2c::ERROR_OK) {
+          this->set_timeout(3 * get_itime_ms(this->readings_.actual_time),
+                            [this]() { this->state_ = State::CollectingData; });
+        } else {
+          this->state_ = State::Idle;
+        }
+        break;
+
+      case State::ReadyToPublishPart1:
+        this->status_clear_warning();
+
+        this->apply_lux_calculation_(this->readings_);
+        this->apply_lux_compensation_(this->readings_);
+        this->apply_glass_attenuation_(this->readings_);
+
+        this->publish_data_part_1_(this->readings_);
+
+        this->state_ = State::ReadyToPublishPart2;
+        break;
+
+      case State::ReadyToPublishPart2:
+        this->publish_data_part_2_(this->readings_);
+
+        this->state_ = State::Idle;
+        break;
+
+      default:
+        break;
+    }
+    if (err != i2c::ERROR_OK)
+      this->status_set_warning();
+  }
+}
+
+ErrorCode VEML7700Component::configure_() {
+  ESP_LOGD(TAG, "Configure");
+
+  ConfigurationRegister als_conf{0};
+  als_conf.ALS_INT_EN = false;
+  als_conf.ALS_PERS = Persistence::PERSISTENCE_1;
+  als_conf.ALS_IT = this->integration_time_;
+  als_conf.ALS_GAIN = this->gain_;
+
+  als_conf.ALS_SD = true;
+  ESP_LOGD(TAG, "Shutdown before config. ALS_CONF_0 to 0x%04X", als_conf.raw);
+  auto err = this->write_register(CommandRegisters::CR_ALS_CONF_0, als_conf.raw_bytes, VEML_REG_SIZE);
+  if (err != i2c::ERROR_OK) {
+    ESP_LOGW(TAG, "Failed to shutdown, I2C error %d", err);
+    return err;
+  }
+  delay(3);
+
+  als_conf.ALS_SD = false;
+  ESP_LOGD(TAG, "Turning on. Setting ALS_CONF_0 to 0x%04X", als_conf.raw);
+  err = this->write_register(CommandRegisters::CR_ALS_CONF_0, als_conf.raw_bytes, VEML_REG_SIZE);
+  if (err != i2c::ERROR_OK) {
+    ESP_LOGW(TAG, "Failed to turn on, I2C error %d", err);
+    return err;
+  }
+
+  PSMRegister psm{0};
+  psm.PSM = PSM::PSM_MODE_1;
+  psm.PSM_EN = false;
+  ESP_LOGD(TAG, "Setting PSM to 0x%04X", psm.raw);
+  err = this->write_register(CommandRegisters::CR_PWR_SAVING, psm.raw_bytes, VEML_REG_SIZE);
+  if (err != i2c::ERROR_OK) {
+    ESP_LOGW(TAG, "Failed to set PSM, I2C error %d", err);
+    return err;
+  }
+
+  return err;
+}
+
+ErrorCode VEML7700Component::reconfigure_time_and_gain_sd_(IntegrationTime time, Gain gain, bool shutdown) {
+  ESP_LOGD(TAG, "Reconfigure time and gain(%d ms, %s, shutdown %s)", get_itime_ms(time), get_gain_str(gain),
+           TRUEFALSE(shutdown));
+
+  ConfigurationRegister als_conf{0};
+  als_conf.raw = 0;
+
+  // We have to before changing parameters
+  als_conf.ALS_SD = shutdown;
+  als_conf.ALS_INT_EN = false;
+  als_conf.ALS_PERS = Persistence::PERSISTENCE_1;
+  als_conf.ALS_IT = time;
+  als_conf.ALS_GAIN = gain;
+  auto err = this->write_register(CommandRegisters::CR_ALS_CONF_0, als_conf.raw_bytes, VEML_REG_SIZE);
+  if (err != i2c::ERROR_OK) {
+    ESP_LOGW(TAG, "%s failed", shutdown ? "Shutdown" : "Turn on");
+  }
+
+  return err;
+}
+
+ErrorCode VEML7700Component::read_sensor_output_(Readings &data) {
+  auto als_err = this->read_register(CommandRegisters::CR_ALS, (uint8_t *) &data.als_counts, VEML_REG_SIZE, false);
+  if (als_err != i2c::ERROR_OK) {
+    ESP_LOGW(TAG, "Error reading ALS register, err = %d", als_err);
+  }
+  auto white_err =
+      this->read_register(CommandRegisters::CR_WHITE, (uint8_t *) &data.white_counts, VEML_REG_SIZE, false);
+  if (white_err != i2c::ERROR_OK) {
+    ESP_LOGW(TAG, "Error reading WHITE register, err = %d", white_err);
+  }
+
+  ConfigurationRegister conf{0};
+  auto err = this->read_register(CommandRegisters::CR_ALS_CONF_0, (uint8_t *) conf.raw_bytes, VEML_REG_SIZE, false);
+  if (err != i2c::ERROR_OK) {
+    ESP_LOGW(TAG, "Error reading ALS_CONF_0 register, err = %d", white_err);
+  }
+  data.actual_time = conf.ALS_IT;
+  data.actual_gain = conf.ALS_GAIN;
+
+  ESP_LOGD(TAG, "read_device_counts: ALS = %d, WHITE = %d, Gain = %s, Time = %d ms", data.als_counts, data.white_counts,
+           get_gain_str(data.actual_gain), get_itime_ms(data.actual_time));
+  return std::max(als_err, white_err);
+}
+
+bool VEML7700Component::are_adjustments_required(Readings &data) {
+  // skip first sample in auto mode -
+  // we need to reconfigure device after last measurement
+  if (this->state_ == State::CollectingDataAuto)
+    return true;
+
+  if (!this->automatic_mode_enabled_)
+    return false;
+
+  // Recommended thresholds as per datasheet
+  static constexpr uint16_t LOW_INTENSITY_THRESHOLD = 100;
+  static constexpr uint16_t HIGH_INTENSITY_THRESHOLD = 10000;
+
+  IntegrationTime times[INTEGRATION_TIMES_COUNT] = {INTEGRATION_TIME_25MS,  INTEGRATION_TIME_50MS,
+                                                    INTEGRATION_TIME_100MS, INTEGRATION_TIME_200MS,
+                                                    INTEGRATION_TIME_400MS, INTEGRATION_TIME_800MS};
+  Gain gains[GAINS_COUNT] = {X_1_8, X_1_4, X_1, X_2};
+
+  if (data.als_counts <= LOW_INTENSITY_THRESHOLD) {
+    Gain next_gain = get_next(gains, data.actual_gain);
+    if (next_gain != data.actual_gain) {
+      data.actual_gain = next_gain;
+      return true;
+    }
+    IntegrationTime next_time = get_next(times, data.actual_time);
+    if (next_time != data.actual_time) {
+      data.actual_time = next_time;
+      return true;
+    }
+  } else if (data.als_counts >= HIGH_INTENSITY_THRESHOLD) {
+    Gain prev_gain = get_prev(gains, data.actual_gain);
+    if (prev_gain != data.actual_gain) {
+      data.actual_gain = prev_gain;
+      return true;
+    }
+    IntegrationTime prev_time = get_prev(times, data.actual_time);
+    if (prev_time != data.actual_time) {
+      data.actual_time = prev_time;
+      return true;
+    }
+  }
+
+  // Counts are either good (between thresholds)
+  // or there is no room to change sensitivity anymore
+  return false;
+}
+
+void VEML7700Component::apply_lux_calculation_(Readings &data) {
+  static const float MAX_GAIN = 2.0f;
+  static const float MAX_ITIME_MS = 800.0f;
+  static const float MAX_LX_RESOLUTION = 0.0036f;
+  float lux_resolution = (MAX_ITIME_MS / (float) get_itime_ms(data.actual_time)) *
+                         (MAX_GAIN / get_gain_coeff(data.actual_gain)) * MAX_LX_RESOLUTION;
+  ESP_LOGD(TAG, "Lux resolution for (%d, %s) = %.4f ", get_itime_ms(data.actual_time), get_gain_str(data.actual_gain),
+           lux_resolution);
+
+  data.als_lux = lux_resolution * (float) data.als_counts;
+  data.white_lux = lux_resolution * (float) data.white_counts;
+  data.fake_infrared_lux = reduce_to_zero(data.white_lux, data.als_lux);
+
+  ESP_LOGD(TAG, "%s mode - ALS = %.1f lx, WHITE = %.1f lx, FAKE_IR = %.1f lx",
+           this->automatic_mode_enabled_ ? "Automatic" : "Manual", data.als_lux, data.white_lux,
+           data.fake_infrared_lux);
+}
+
+void VEML7700Component::apply_lux_compensation_(Readings &data) {
+  if (!this->lux_compensation_enabled_)
+    return;
+  auto &local_data = data;
+  // Always apply correction for G1/4 and G1/8
+  // Other Gains G1 and G2 are not supposed to be used for lux > 1000,
+  // corrections may help, but not a lot.
+  //
+  // "Illumination values higher than 1000 lx show non-linearity.
+  // This non-linearity is the same for all sensors, so a compensation formula can be applied
+  // if this light level is exceeded"
+  auto compensate = [&local_data](float &lux) {
+    auto calculate_high_lux_compensation = [](float lux_veml) -> float {
+      return (((6.0135e-13 * lux_veml - 9.3924e-9) * lux_veml + 8.1488e-5) * lux_veml + 1.0023) * lux_veml;
+    };
+
+    if (lux > 1000.0f || local_data.actual_gain == Gain::X_1_8 || local_data.actual_gain == Gain::X_1_4) {
+      lux = calculate_high_lux_compensation(lux);
+    }
+  };
+
+  compensate(data.als_lux);
+  compensate(data.white_lux);
+  data.fake_infrared_lux = reduce_to_zero(data.white_lux, data.als_lux);
+
+  ESP_LOGD(TAG, "Lux compensation - ALS = %.1f lx, WHITE = %.1f lx, FAKE_IR = %.1f lx", data.als_lux, data.white_lux,
+           data.fake_infrared_lux);
+}
+
+void VEML7700Component::apply_glass_attenuation_(Readings &data) {
+  data.als_lux *= this->glass_attenuation_factor_;
+  data.white_lux *= this->glass_attenuation_factor_;
+  data.fake_infrared_lux = reduce_to_zero(data.white_lux, data.als_lux);
+  ESP_LOGD(TAG, "Glass attenuation - ALS = %.1f lx, WHITE = %.1f lx, FAKE_IR = %.1f lx", data.als_lux, data.white_lux,
+           data.fake_infrared_lux);
+}
+
+void VEML7700Component::publish_data_part_1_(Readings &data) {
+  if (this->ambient_light_sensor_ != nullptr) {
+    this->ambient_light_sensor_->publish_state(data.als_lux);
+  }
+  if (this->white_sensor_ != nullptr) {
+    this->white_sensor_->publish_state(data.white_lux);
+  }
+}
+
+void VEML7700Component::publish_data_part_2_(Readings &data) {
+  if (this->fake_infrared_sensor_ != nullptr) {
+    this->fake_infrared_sensor_->publish_state(data.fake_infrared_lux);
+  }
+  if (this->ambient_light_counts_sensor_ != nullptr) {
+    this->ambient_light_counts_sensor_->publish_state(data.als_counts);
+  }
+  if (this->white_counts_sensor_ != nullptr) {
+    this->white_counts_sensor_->publish_state(data.white_counts);
+  }
+  if (this->actual_gain_sensor_ != nullptr) {
+    this->actual_gain_sensor_->publish_state(get_gain_coeff(data.actual_gain));
+  }
+  if (this->actual_integration_time_sensor_ != nullptr) {
+    this->actual_integration_time_sensor_->publish_state(get_itime_ms(data.actual_time));
+  }
+}
 }  // namespace veml7700
 }  // namespace esphome
