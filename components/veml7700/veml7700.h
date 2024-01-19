@@ -56,8 +56,6 @@ enum PSM : uint8_t {
   PSM_MODE_4 = 3,
 };
 
-#pragma pack(push)
-#pragma pack(1)
 //
 // VEML7700_CR_ALS_CONF_0 Register (0x00)
 //
@@ -78,7 +76,7 @@ union ConfigurationRegister {
     bool reserved_13 : 1;        // 0
     bool reserved_14 : 1;        // 0
     bool reserved_15 : 1;        // 0
-  };
+  } __attribute__((packed));
 };
 
 //
@@ -91,9 +89,8 @@ union PSMRegister {
     bool PSM_EN : 1;
     uint8_t PSM : 2;
     uint16_t reserved : 13;
-  };
+  } __attribute__((packed));
 };
-#pragma pack(pop)
 
 class VEML7700Component : public PollingComponent, public i2c::I2CDevice {
  public:
