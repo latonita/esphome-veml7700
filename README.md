@@ -1,5 +1,7 @@
 This is preliminary draft version of VEML7700 component for EspHome.
 
+Please better use version from official PR(): `-source: github://pr#6067`
+
 Example config:
 ```
 esphome:
