@@ -26,7 +26,6 @@ i2c:
   sda: GPIO25
   scl: GPIO32
   scan: true
-  frequency: 5kHz
 
 sensor:
   - platform: veml7700
