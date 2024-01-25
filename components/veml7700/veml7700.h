@@ -11,17 +11,17 @@ namespace veml7700 {
 using esphome::i2c::ErrorCode;
 
 //
-// Datasheet:  https://www.vishay.com/docs/84286/veml7700.pdf
+// Datasheet: https://www.vishay.com/docs/84286/veml7700.pdf
 //
 
-enum CommandRegisters : uint8_t {
-  CR_ALS_CONF_0 = 0x00,  // W: ALS gain, integration time, interrupt, and shutdown
-  CR_ALS_WH = 0x01,      // W: ALS high threshold window setting
-  CR_ALS_WL = 0x02,      // W: ALS low threshold window setting
-  CR_PWR_SAVING = 0x03,  // W: Set (15 : 3) 0000 0000 0000 0b
-  CR_ALS = 0x04,         // R: MSB, LSB data of whole ALS 16 bits
-  CR_WHITE = 0x05,       // R: MSB, LSB data of whole WHITE 16 bits
-  CR_ALS_INT = 0x06      // R: ALS INT trigger event
+enum class CommandRegisters : uint8_t {
+  ALS_CONF_0 = 0x00,  // W: ALS gain, integration time, interrupt, and shutdown
+  ALS_WH = 0x01,      // W: ALS high threshold window setting
+  ALS_WL = 0x02,      // W: ALS low threshold window setting
+  PWR_SAVING = 0x03,  // W: Set (15 : 3) 0000 0000 0000 0b
+  ALS = 0x04,         // R: MSB, LSB data of whole ALS 16 bits
+  WHITE = 0x05,       // R: MSB, LSB data of whole WHITE 16 bits
+  ALS_INT = 0x06      // R: ALS INT trigger event
 };
 
 enum Gain : uint8_t {
@@ -125,7 +125,7 @@ class VEML7700Component : public PollingComponent, public i2c::I2CDevice {
   // Internal state machine, used to split all the actions into
   // small steps in loop() to make sure we are not blocking execution
   //
-  enum State : uint8_t {
+  enum class State : uint8_t {
     NOT_INITIALIZED,
     INITIAL_SETUP_COMPLETED,
     IDLE,
@@ -135,8 +135,9 @@ class VEML7700Component : public PollingComponent, public i2c::I2CDevice {
     ADJUSTMENT_NEEDED,
     ADJUSTMENT_IN_PROGRESS,
     READY_TO_APPLY_ADJUSTMENTS,
-    READY_TO_PUBLISH_PART1,
-    READY_TO_PUBLISH_PART2
+    READY_TO_PUBLISH_PART_1,
+    READY_TO_PUBLISH_PART_2,
+    READY_TO_PUBLISH_PART_3
   } state_{State::NOT_INITIALIZED};
 
   //
@@ -146,7 +147,7 @@ class VEML7700Component : public PollingComponent, public i2c::I2CDevice {
     uint16_t als_counts{0};
     uint16_t white_counts{0};
     IntegrationTime actual_time{INTEGRATION_TIME_100MS};
-    Gain actual_gain{X_1};
+    Gain actual_gain{X_1_8};
     float als_lux{0};
     float white_lux{0};
     float fake_infrared_lux{0};
@@ -169,6 +170,7 @@ class VEML7700Component : public PollingComponent, public i2c::I2CDevice {
   void apply_glass_attenuation_(Readings &data);
   void publish_data_part_1_(Readings &data);
   void publish_data_part_2_(Readings &data);
+  void publish_data_part_3_(Readings &data);
 
   //
   // Component configuration
